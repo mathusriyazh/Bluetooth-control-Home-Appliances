@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>BLE Relay Control</title>
+  <style>
+    button { font-size: 24px; padding: 20px; margin: 10px; width: 140px; }
+  </style>
+</head>
+<body>
+  <h2>ESP32 BLE Relay Controller</h2>
+  <button onclick="connectBLE()">Connect</button><br>
+  <button onclick="sendCommand('ON')">Relay ON</button>
+  <button onclick="sendCommand('OFF')">Relay OFF</button>
+  <pre id="log"></pre>
+
+<script>
+let bleDevice, bleServer, uartService, txChar, rxChar;
+
+const SERVICE_UUID           = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CHARACTERISTIC_UUID_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const CHARACTERISTIC_UUID_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+function log(msg) {
+  document.getElementById("log").innerText += msg + "\n";
+}
+
+async function connectBLE() {
+  try {
+    log("Requesting BLE device...");
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ name: "ESP32-RELAY-BLE" }],
+      optionalServices: [SERVICE_UUID]
+    });
+
+    bleServer = await bleDevice.gatt.connect();
+    log("Connected!");
+
+    uartService = await bleServer.getPrimaryService(SERVICE_UUID);
+    rxChar = await uartService.getCharacteristic(CHARACTERISTIC_UUID_RX);
+    log("Ready!");
+  } 
+  catch (error) {
+    log("Error: " + error);
+  }
+}
+
+async function sendCommand(message) {
+  if (!rxChar) {
+    log("Not connected");
+    return;
+  }
+
+  const encoder = new TextEncoder();
+  await rxChar.writeValue(encoder.encode(message));
+  log("Sent: " + message);
+}
+</script>
+</body>
+</html>
