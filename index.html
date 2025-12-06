@@ -1,58 +1,168 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-  <title>BLE Relay Control</title>
+  <meta charset="utf-8" />
+  <title>ESP32 BLE Relay Control</title>
   <style>
-    button { font-size: 24px; padding: 20px; margin: 10px; width: 140px; }
+    body { font-family: Arial, sans-serif; text-align:center; margin-top:36px; }
+    button { padding:14px 26px; font-size:18px; margin:8px; border-radius:8px; cursor:pointer; }
+    #connect { background:#1e88e5; color:white; }
+    #on { background:#43a047; color:white; }
+    #off { background:#e53935; color:white; }
+    #status { margin-top:14px; font-weight:600; }
+    pre { text-align:left; width:80%; max-width:720px; margin:12px auto; background:#f7f7f7; padding:10px; border-radius:6px; overflow:auto; }
   </style>
 </head>
 <body>
-  <h2>ESP32 BLE Relay Controller</h2>
-  <button onclick="connectBLE()">Connect</button><br>
-  <button onclick="sendCommand('ON')">Relay ON</button>
-  <button onclick="sendCommand('OFF')">Relay OFF</button>
+  <h1>ESP32 BLE Relay Control</h1>
+
+  <button id="connect">Connect BLE</button><br>
+  <button id="on" disabled>Relay ON</button>
+  <button id="off" disabled>Relay OFF</button>
+
+  <p id="status">Status: Not connected</p>
+
   <pre id="log"></pre>
 
 <script>
-let bleDevice, bleServer, uartService, txChar, rxChar;
+/* ====== UUIDs (must match your ESP32 sketch) ====== */
+const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CHAR_UUID_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // write to this
+const CHAR_UUID_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // notify from this (optional)
 
-const SERVICE_UUID           = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const CHARACTERISTIC_UUID_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const CHARACTERISTIC_UUID_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+let device = null;
+let server = null;
+let rxChar = null;
+let txChar = null;
+
+const connectBtn = document.getElementById('connect');
+const onBtn = document.getElementById('on');
+const offBtn = document.getElementById('off');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
 
 function log(msg) {
-  document.getElementById("log").innerText += msg + "\n";
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent += `[${t}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(s) {
+  statusEl.textContent = "Status: " + s;
 }
 
 async function connectBLE() {
   try {
-    log("Requesting BLE device...");
-    bleDevice = await navigator.bluetooth.requestDevice({
-      filters: [{ name: "ESP32-RELAY-BLE" }],
+    setStatus("Requesting device...");
+    // Option A: Filter by name
+    // device = await navigator.bluetooth.requestDevice({ filters: [{ name: 'ESP32-RELAY-BLEUUID' }], optionalServices: [SERVICE_UUID] });
+
+    // Option B: Accept all devices but require the service (less strict)
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
       optionalServices: [SERVICE_UUID]
     });
 
-    bleServer = await bleDevice.gatt.connect();
-    log("Connected!");
+    device.addEventListener('gattserverdisconnected', onDisconnected);
 
-    uartService = await bleServer.getPrimaryService(SERVICE_UUID);
-    rxChar = await uartService.getCharacteristic(CHARACTERISTIC_UUID_RX);
-    log("Ready!");
-  } 
-  catch (error) {
-    log("Error: " + error);
+    setStatus('Connecting to GATT server...');
+    server = await device.gatt.connect();
+
+    setStatus('Getting service...');
+    const service = await server.getPrimaryService(SERVICE_UUID);
+
+    setStatus('Getting characteristics...');
+    // RX = characteristic we write to
+    rxChar = await service.getCharacteristic(CHAR_UUID_RX);
+
+    // TX = characteristic that may notify back
+    try {
+      txChar = await service.getCharacteristic(CHAR_UUID_TX);
+      await txChar.startNotifications();
+      txChar.addEventListener('characteristicvaluechanged', handleNotifications);
+      log('TX notifications enabled.');
+    } catch (e) {
+      log('TX characteristic not found or no notifications: ' + e);
+      txChar = null;
+    }
+
+    setStatus('Connected to ' + (device.name || device.id));
+    connectBtn.textContent = 'Disconnect';
+    onBtn.disabled = false;
+    offBtn.disabled = false;
+    log('Ready. Use ON / OFF buttons to control relay.');
+  } catch (err) {
+    console.error(err);
+    setStatus('Error: ' + err);
+    log('Connection error: ' + err);
   }
 }
 
-async function sendCommand(message) {
-  if (!rxChar) {
-    log("Not connected");
-    return;
+async function disconnectBLE() {
+  if (!device) return;
+  try {
+    setStatus('Disconnecting...');
+    if (txChar) {
+      try { await txChar.stopNotifications(); } catch(e){/*ignore*/ }
+      txChar.removeEventListener('characteristicvaluechanged', handleNotifications);
+    }
+    if (device.gatt.connected) await device.gatt.disconnect();
+    setStatus('Disconnected');
+    connectBtn.textContent = 'Connect BLE';
+    onBtn.disabled = true;
+    offBtn.disabled = true;
+    log('Disconnected from device.');
+    device = null;
+    rxChar = null;
+    txChar = null;
+  } catch (err) {
+    console.error(err);
+    setStatus('Disconnect error: ' + err);
   }
+}
 
-  const encoder = new TextEncoder();
-  await rxChar.writeValue(encoder.encode(message));
-  log("Sent: " + message);
+function onDisconnected() {
+  setStatus('Device disconnected');
+  connectBtn.textContent = 'Connect BLE';
+  onBtn.disabled = true;
+  offBtn.disabled = true;
+  log('Device disconnected.');
+}
+
+function handleNotifications(evt) {
+  const value = evt.target.value;
+  // decode Uint8Array to string
+  const decoder = new TextDecoder('utf-8');
+  const str = decoder.decode(value);
+  log('Notification: ' + str);
+}
+
+async function sendCommand(cmd) {
+  if (!rxChar) { log('Not connected to RX characteristic'); return; }
+  try {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(cmd);
+    await rxChar.writeValue(data);
+    log('Sent: ' + cmd);
+  } catch (err) {
+    console.error(err);
+    log('Write error: ' + err);
+  }
+}
+
+// UI events
+connectBtn.addEventListener('click', async () => {
+  if (!device) await connectBLE();
+  else await disconnectBLE();
+});
+onBtn.addEventListener('click', () => sendCommand('ON'));
+offBtn.addEventListener('click', () => sendCommand('OFF'));
+
+// compatibility check
+if (!('bluetooth' in navigator)) {
+  setStatus('Web Bluetooth API not supported in this browser.');
+  connectBtn.disabled = true;
+  log('Use Chrome on Android/Windows for Web Bluetooth.');
 }
 </script>
 </body>
